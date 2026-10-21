@@ -19,6 +19,7 @@ Tout est déterministe : même graine, mêmes fichiers. Aucun accès réseau.
 
 Usage :
     uv run python -m nimbus_lake.donnees data/bronze            # 2 ans, 9 stations
+    uv run python -m nimbus_lake.donnees --silver-massif 1000   # bloc 2 : 29 M lignes
 """
 
 from __future__ import annotations
@@ -287,8 +288,96 @@ def silver_massif(graine: int = 42, n_stations: int = 200, n_annees: int = 10,
         }, schema=SCHEMA_SILVER)
 
 
+# ---------------------------------------------------------------------------
+# Bloc 2 : climatologie journalière synthétique et Silver massif sur disque
+# ---------------------------------------------------------------------------
+
+SCHEMA_JOURNALIER = pa.schema([
+    pa.field("ic_id", pa.string(), nullable=False),
+    pa.field("date", pa.date32(), nullable=False),
+    pa.field("tn", pa.float64()),
+    pa.field("tx", pa.float64()),
+    pa.field("rr", pa.float64()),
+])
+
+
+def journalier_synthetique(graine: int = 42, n_stations: int = 50, n_annees: int = 10,
+                           debut: date = date(2016, 1, 1), taux_trous: float = 0.01) -> pa.Table:
+    """Fonction pure : une climatologie journalière (une ligne par station et par jour mesuré).
+
+    Défauts volontaires :
+    - des jours absents (pas de ligne) : environ `taux_trous` des jours, sur une station sur deux ;
+    - des tn ou tx nuls (capteur en panne une partie de la journée) ;
+    - des valeurs arrondies à 0,1 °C, donc des égalités (deux jours au même tn mensuel).
+    Les étés sont assez chauds pour produire des épisodes de tx >= 30 °C.
+    """
+    n_jours = (date(debut.year + n_annees, debut.month, debut.day) - debut).days
+    jours = np.arange(n_jours)
+    jours_dates = np.datetime64(debut.isoformat()) + jours.astype("timedelta64[D]")
+    doy = (jours_dates - jours_dates.astype("datetime64[Y]")).astype(np.int64)
+    saison = np.cos(2 * np.pi * (doy - 199) / 365.25)
+    tables: list[pa.Table] = []
+    for k in range(1, n_stations + 1):
+        rng = np.random.default_rng([graine, 7, k])
+        t_moy, ampl = rng.uniform(10.0, 16.0), rng.uniform(6.0, 11.0)
+        anomalie = np.zeros(n_jours)
+        bruit = rng.normal(0, 1.9, n_jours)
+        for j in range(1, n_jours):
+            anomalie[j] = 0.8 * anomalie[j - 1] + bruit[j]
+        tm = t_moy + ampl * saison + anomalie
+        amplitude_jour = np.clip(rng.normal(9.0 + 3.0 * saison, 2.0, n_jours), 2.0, 20.0)
+        tn = np.round(tm - amplitude_jour / 2, 1)
+        tx = np.round(tm + amplitude_jour / 2, 1)
+        rr = np.where(rng.random(n_jours) < 0.3, np.round(rng.exponential(4.0, n_jours), 1), 0.0)
+        garde = np.ones(n_jours, dtype=bool)
+        if k % 2 == 0:
+            garde &= rng.random(n_jours) >= taux_trous
+        tn_null = rng.random(n_jours) < 0.005
+        tx_null = rng.random(n_jours) < 0.005
+        tables.append(pa.table({
+            "ic_id": pa.array([f"ST{k:04d}"] * int(garde.sum()), pa.string()),
+            "date": pa.array(jours_dates[garde].astype("datetime64[D]"), pa.date32()),
+            "tn": pa.array(tn[garde], pa.float64(), mask=tn_null[garde]),
+            "tx": pa.array(tx[garde], pa.float64(), mask=tx_null[garde]),
+            "rr": pa.array(rr[garde], pa.float64()),
+        }, schema=SCHEMA_JOURNALIER))
+    return pa.concat_tables(tables)
+
+
+def ecrire_silver_massif(racine: Path, n_stations: int = 200, n_annees: int = 10, graine: int = 42) -> int:
+    """Coquille impérative : écrit `silver_massif` sous racine/annee=AAAA/ (hive, zstd).
+
+    Indépendant du bloc 1 : sert de point de départ au bloc 2 même si votre partie C
+    du bloc 1 n'est pas terminée. Renvoie le nombre de lignes écrites.
+    """
+    import pyarrow.compute as pc
+    import pyarrow.dataset as ds
+
+    schema = SCHEMA_SILVER.append(pa.field("annee", pa.int16()))
+    n = 0
+
+    def lots() -> Iterator[pa.RecordBatch]:
+        nonlocal n
+        for table in silver_massif(graine, n_stations, n_annees):
+            n += table.num_rows
+            yield from table.append_column("annee", pc.cast(pc.year(table["ts"]), pa.int16())).to_batches()
+
+    ds.write_dataset(lots(), racine, schema=schema, format="parquet",
+                     partitioning=ds.partitioning(pa.schema([schema.field("annee")]), flavor="hive"),
+                     existing_data_behavior="overwrite_or_ignore",
+                     file_options=ds.ParquetFileFormat().make_write_options(compression="zstd"))
+    return n
+
+
 def main() -> None:  # pragma: no cover - coquille impérative
     args = sys.argv[1:]
+    if args and args[0] == "--silver-massif":
+        n_stations = int(args[1]) if len(args) > 1 else 200
+        cible = Path(args[2] if len(args) > 2 else f"data/silver_massif_{n_stations}")
+        if cible.exists() and any(cible.iterdir()):
+            sys.exit(f"{cible} existe déjà.")
+        print(f"Écrit : {cible} ({ecrire_silver_massif(cible, n_stations):,} lignes)".replace(",", " "))
+        return
     racine = Path(args[0] if args else "data/bronze")
     rapport = ecrire_bronze(racine)
     print(f"Écrit : {racine} ({len(rapport.fichiers)} fichiers, "

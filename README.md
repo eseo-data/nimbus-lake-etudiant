@@ -27,7 +27,7 @@ Docker n'est pas utile au bloc 1. Il servira au bloc 5 (Kafka / Redpanda).
 | Bloc | Thème | Modules |
 |---|---|---|
 | 1 | Data lake, lakehouse, medallion. Parquet, compression, partitioning | `b1_parquet.py`, `b1_pipeline.py`, `b1_echelle.py`, `b1_defi_footer.py` |
-| 2 | Moteur analytique local : DuckDB, exécution vectorisée, out-of-core | à venir |
+| 2 | Moteur analytique local : DuckDB, plans d'exécution, out-of-core | `b2_duckdb.py`, `b2_canicule.py`, `b2_hors_memoire.py`, `b2_defi_agregation.py` |
 | 3 | Tables transactionnelles : Iceberg, snapshots, time travel, schema evolution | à venir |
 | 4 | Spark en profondeur : shuffle, data skew, broadcast join, Spark UI | à venir |
 | 5 | Kafka au niveau système : partitions, consumer groups, offsets, exactly-once | à venir |
@@ -71,6 +71,40 @@ Partie B, critère de réussite. Le script hérité est juste sur tn et tx, mais
 Pour les agrégations, l'outil est libre : `pyarrow.compute` ou DuckDB (`duckdb.sql("SELECT … FROM silver").to_arrow_table()` lit directement une table Arrow nommée `silver`).
 
 Partie C, à rendre dans votre compte rendu : le tableau du banc d'essai pour les cinq clés, avec votre choix de clé argumenté pour deux requêtes types. La première demande une station sur 10 ans, la seconde toutes les stations sur un mois.
+
+## Bloc 2 : déroulé du TP (2 h 30)
+
+Mettre le dépôt à jour, puis préparer le Silver massif (environ 15 s, 300 Mo, indépendant de votre partie C du bloc 1) :
+
+```bash
+git pull
+uv sync
+uv run python -m nimbus_lake.donnees --silver-massif 1000
+```
+
+| Partie | Durée | Fichier | Contenu |
+|---|---|---|---|
+| A | 35 min | `b2_duckdb.py` | connexion et réglages, premier plan d'exécution, lecture du profil `EXPLAIN ANALYZE` en JSON, climatologie mensuelle au contrat de `gold_v2.mensuelle` (égalités, nulls) |
+| B | 70 min | `b2_canicule.py` | reprendre `b2_legacy.py` (à ne pas modifier) en une requête SQL : indicateurs de chaleur, épisodes de jours consécutifs (gaps and islands) |
+| C | 35 min | `b2_hors_memoire.py` | 29 millions de lignes avec 64 Mo : agrégation et tri sous `memory_limit`, débordement sur disque, plus petite mémoire suffisante |
+| Bonus | | `b2_canicule.py` | les plus longs épisodes toutes stations confondues, avec `QUALIFY` |
+| Défi ★★★ | | `b2_defi_agregation.py` | écrire à la main une agrégation par hachage hybride qui respecte un budget mémoire et déborde sur disque |
+
+```bash
+uv run pytest tests/test_b2_duckdb.py            # partie A
+uv run pytest tests/test_b2_canicule.py          # partie B
+uv run pytest tests/test_b2_hors_memoire.py      # partie C
+uv run pytest tests/test_b2_defi_agregation.py   # défi (sauté tant qu'il n'est pas commencé)
+uv run python -m nimbus_lake.b2_canicule 1000    # banc d'essai B : legacy contre DuckDB
+uv run python -m nimbus_lake.b2_hors_memoire data/silver_massif_1000   # banc d'essai C
+```
+
+Partie B, critère de réussite : le script hérité est lent, et il fusionne deux épisodes séparés par un jour manquant. Votre requête doit :
+- respecter la spécification en tête de `b2_canicule.py` (implémentation de référence naïve dans les tests) ;
+- donner le même résultat que le legacy sur les stations sans jour manquant ;
+- tenir en une requête, avec une window function.
+
+Partie C, à rendre dans le rapport de performance : le tableau du banc d'essai sur votre machine, et votre explication de deux constats : pourquoi l'agrégation passe à 64 Mo, pourquoi le tri complet échoue.
 
 ## Règles du jeu
 

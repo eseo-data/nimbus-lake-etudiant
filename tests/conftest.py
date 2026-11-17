@@ -34,3 +34,28 @@ def silver_massif_petit(tmp_path_factory: pytest.TempPathFactory) -> Path:
     racine = tmp_path_factory.mktemp("silver_massif")
     ecrire_silver_massif(racine, n_stations=30, n_annees=2, graine=5)
     return racine
+
+
+@pytest.fixture()
+def entrepot(tmp_path: Path) -> Path:
+    """Bloc 3 : un dossier d'entrepôt Iceberg neuf par test."""
+    return tmp_path / "entrepot"
+
+
+@pytest.fixture()
+def publier_reference():  # type: ignore[no-untyped-def]
+    """Bloc 3 : publie des livraisons avec pyiceberg seul (indépendant de votre partie B)."""
+    import duckdb
+
+    from nimbus_lake.b3_iceberg import SCHEMA_ARROW
+
+    def publier(table, lots):  # type: ignore[no-untyped-def]
+        for lot in lots:
+            con = duckdb.connect()
+            con.register("l", lot)
+            propre = con.sql("SELECT ic_id, date, tn, tx, rr FROM l QUALIFY row_number() OVER "
+                             "(PARTITION BY ic_id, date ORDER BY recu_a DESC) = 1").to_arrow_table()
+            table.upsert(propre.cast(SCHEMA_ARROW), join_cols=["ic_id", "date"])
+        table.refresh()
+
+    return publier

@@ -369,6 +369,60 @@ def ecrire_silver_massif(racine: Path, n_stations: int = 200, n_annees: int = 10
     return n
 
 
+# ---------------------------------------------------------------------------
+# Bloc 3 : livraisons quotidiennes avec corrections tardives
+# ---------------------------------------------------------------------------
+
+SCHEMA_LIVRAISON = SCHEMA_JOURNALIER.append(pa.field("recu_a", pa.timestamp("us", tz="UTC"), nullable=False))
+
+
+def livraisons(graine: int = 42, n_stations: int = 20, n_jours: int = 60,
+               debut: date = date(2024, 6, 1), taux_corrections: float = 0.02) -> list[pa.Table]:
+    """Fonction pure : une livraison par jour, au SCHEMA_LIVRAISON.
+
+    La livraison du jour J (reçue le lendemain à 06:00 UTC) contient :
+    - les valeurs du jour J pour toutes les stations ;
+    - des CORRECTIONS de jours déjà livrés (30 derniers jours) : même (ic_id, date), valeurs différentes ;
+    - parfois deux versions d'une même ligne dans la même livraison : celle reçue en dernier
+      (`recu_a` le plus grand) fait foi.
+    La vérité à publier est donc, pour chaque (ic_id, date), la version de plus grand `recu_a`.
+    """
+    import pyarrow.compute as pc
+
+    base = journalier_synthetique(graine, n_stations, 1, debut, taux_trous=0.0)
+    lignes = base.filter(pc.less(base["date"], pa.scalar(debut + timedelta(days=n_jours), pa.date32())))
+    par_jour: dict[date, list[dict[str, object]]] = {}
+    for r in lignes.to_pylist():
+        par_jour.setdefault(r["date"], []).append(r)
+    rng = random.Random(f"livraisons-{graine}")
+    deja: list[dict[str, object]] = []
+    sortie: list[pa.Table] = []
+    for j in range(n_jours):
+        jour = debut + timedelta(days=j)
+        recu = datetime(jour.year, jour.month, jour.day, 6, tzinfo=UTC) + timedelta(days=1)
+        du_jour = [dict(r, recu_a=recu) for r in par_jour.get(jour, [])]
+        corrections = []
+        for r in deja[-30 * n_stations:]:                 # corrections sur les 30 derniers jours
+            if rng.random() < taux_corrections:
+                c = dict(r)
+                if c["tx"] is not None:
+                    c["tx"] = round(float(c["tx"]) + rng.choice((-1.5, -0.5, 0.5, 1.5)), 1)  # type: ignore[arg-type]
+                c["recu_a"] = recu + timedelta(minutes=rng.randint(1, 50))
+                corrections.append(c)
+        doublons = []
+        for r in du_jour:
+            if rng.random() < 0.05:
+                v = dict(r)
+                v["tn"] = None if v["tn"] is None else round(float(v["tn"]) - 0.3, 1)  # type: ignore[arg-type]
+                v["recu_a"] = recu + timedelta(minutes=55)
+                doublons.append(v)
+        lot = du_jour + corrections + doublons
+        rng.shuffle(lot)
+        sortie.append(pa.Table.from_pylist(lot, schema=SCHEMA_LIVRAISON))
+        deja.extend(du_jour)
+    return sortie
+
+
 def main() -> None:  # pragma: no cover - coquille impérative
     args = sys.argv[1:]
     if args and args[0] == "--silver-massif":

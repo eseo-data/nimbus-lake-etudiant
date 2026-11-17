@@ -8,6 +8,7 @@ dependencies = [
     "numpy>=2.0",
     "pyarrow>=18",
     "duckdb>=1.4",
+    "pyiceberg[pyarrow,pyiceberg-core,sql-sqlite]>=0.12",
 ]
 
 [dependency-groups]

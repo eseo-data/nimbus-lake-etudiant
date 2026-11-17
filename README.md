@@ -28,7 +28,7 @@ Docker n'est pas utile au bloc 1. Il servira au bloc 5 (Kafka / Redpanda).
 |---|---|---|
 | 1 | Data lake, lakehouse, medallion. Parquet, compression, partitioning | `b1_parquet.py`, `b1_pipeline.py`, `b1_echelle.py`, `b1_defi_footer.py` |
 | 2 | Moteur analytique local : DuckDB, plans d'exécution, out-of-core | `b2_duckdb.py`, `b2_canicule.py`, `b2_hors_memoire.py`, `b2_defi_agregation.py` |
-| 3 | Tables transactionnelles : Iceberg, snapshots, time travel, schema evolution | à venir |
+| 3 | Tables transactionnelles : Iceberg, snapshots, time travel, schema et partition evolution | `b3_iceberg.py`, `b3_publication.py`, `b3_maintenance.py`, `b3_defi_avro.py` |
 | 4 | Spark en profondeur : shuffle, data skew, broadcast join, Spark UI | à venir |
 | 5 | Kafka au niveau système : partitions, consumer groups, offsets, exactly-once | à venir |
 | 6 | Orchestration et data contracts : Dagster, ODCS, tests de données | à venir |
@@ -105,6 +105,43 @@ Partie B, critère de réussite : le script hérité est lent, et il fusionne de
 - tenir en une requête, avec une window function.
 
 Partie C, à rendre dans le rapport de performance : le tableau du banc d'essai sur votre machine, et votre explication de deux constats : pourquoi l'agrégation passe à 64 Mo, pourquoi le tri complet échoue.
+
+## Bloc 3 : déroulé du TP (2 h 30)
+
+Mettre le dépôt à jour (`pyiceberg` arrive dans les dépendances) :
+
+```bash
+git pull
+uv sync
+```
+
+La table Iceberg vit dans un dossier local, et son catalogue dans un fichier SQLite. Rien n'est téléchargé, aucun serveur n'est nécessaire.
+
+| Partie | Durée | Fichier | Contenu |
+|---|---|---|---|
+| A | 35 min | `b3_iceberg.py` | catalogue SQLite, table partitionnée par mois (partitioning caché), état lu dans les métadonnées, time travel, schema evolution sans réécriture |
+| B | 70 min | `b3_publication.py` | reprendre `b3_legacy.py` (à ne pas modifier) : publier les livraisons quotidiennes par upsert, atomiquement, de façon idempotente, avec retour arrière |
+| C | 35 min | `b3_maintenance.py` | des semaines de publications : compaction, expiration des snapshots, partition evolution |
+| Bonus | | `b3_publication.py` | Write-Audit-Publish avec une branche |
+| Défi ★★★ | | `b3_defi_avro.py` | lister les fichiers d'un snapshot à la main, de metadata.json aux manifests Avro, sans bibliothèque Iceberg ni Avro |
+
+```bash
+uv run pytest tests/test_b3_iceberg.py        # partie A
+uv run pytest tests/test_b3_publication.py    # partie B
+uv run pytest tests/test_b3_maintenance.py    # partie C
+uv run pytest tests/test_b3_defi_avro.py      # défi (sauté tant qu'il n'est pas commencé)
+uv run python -m nimbus_lake.b3_maintenance 50 60   # banc d'essai : 60 publications (50 stations) puis maintenance, 2 à 3 min
+```
+
+Partie B, critère de réussite. Le script hérité supprime le dossier Gold puis le réécrit. Pendant la réécriture, les lecteurs voient des mois manquants, et une coupure fait perdre des données. Votre publication doit :
+- donner le même contenu qu'une référence naïve après 30 livraisons (corrections et doublons compris) ;
+- laisser la table strictement inchangée quand une panne survient avant la validation ;
+- être idempotente : republier une livraison ne change rien ;
+- permettre de revenir au snapshot d'avant une livraison erronée.
+
+Partie C, à rendre dans le rapport de performance : la sortie du banc d'essai sur votre machine, et votre explication de deux constats : pourquoi une publication crée plusieurs snapshots, pourquoi le dossier `metadata/` ne rétrécit pas après l'expiration.
+
+Les tests des parties C et du défi publient leurs données avec pyiceberg seul. Ils ne dépendent donc pas de votre partie B, mais ils utilisent A1 et A2.
 
 ## Règles du jeu
 
